@@ -48,6 +48,10 @@ At 1.5 million claims per 30-day month, the average is about **50,000 claims per
 | Payer-rule rollback and stale-dispatch fencing | **≤5 minutes** from approval |
 | First-pass payer acceptance | **≥98%** on covered routes within **two business days**. Rejections and missing or indeterminate acknowledgments count as misses. |
 
+## Hands-on learning lab
+
+Start with the [Python, FastAPI, and PostgreSQL submission lab](learning/README.md). Run a synthetic claim through an API and a separate worker, simulate a lost clearinghouse receipt, and inspect how the same delivery is recovered.
+
 ## Requirements
 
 - Python 3.10 or newer
