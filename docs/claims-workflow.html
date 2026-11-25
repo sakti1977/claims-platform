@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claims Platform · Workflow Replay</title>
+<style>
+:root{color-scheme:dark;--base:#101926;--panel:#172434;--line:#34465a;--text:#eef6fc;--muted:#abc0d2;--active:#74f1c8;--warning:#ffd17d}
+*{box-sizing:border-box}body{margin:0;background:var(--base);color:var(--text);font:16px/1.5 system-ui,sans-serif}main{max-width:1150px;margin:auto;padding:clamp(20px,5vw,60px)}h1{font-size:clamp(2rem,5vw,3.4rem);line-height:1.08;margin:0 0 12px}h2,h3,p{margin:0 0 8px}.intro,small,.subtitle{color:var(--muted)}.controls{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0 18px}button,select{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 13px}button{cursor:pointer}button:disabled{opacity:.55;cursor:default}button:focus-visible,select:focus-visible{outline:2px solid var(--active);outline-offset:3px}#play{background:var(--active);color:#10231f;font-weight:700}.layout{display:grid;grid-template-columns:minmax(280px,1fr) minmax(260px,.85fr);gap:22px;align-items:start}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}.diagram{display:grid}.node{padding:11px 14px;border:1px solid var(--line);border-radius:9px;background:var(--base)}.node strong,.node small{display:block}.node.current{border-color:var(--active)}.node.warning{border-color:var(--warning)}.edge{display:flex;justify-content:center;align-items:center;gap:7px;min-height:29px;color:var(--muted);font-size:.81rem}.arrow{font-size:1.35rem;line-height:1}.edge.live{color:var(--active);font-weight:700}.edge.live .arrow{animation:pulse .75s ease-in-out infinite alternate}@keyframes pulse{from{opacity:.42;transform:translateY(-2px)}to{opacity:1;transform:translateY(2px)}}.side{display:grid;gap:14px}.packet{overflow-wrap:anywhere;white-space:pre-wrap;font: .88rem/1.5 ui-monospace,monospace;color:var(--active);background:var(--base);padding:12px;border-radius:8px}.note{min-height:3em}.progress{color:var(--muted);font-variant-numeric:tabular-nums}.log{margin:8px 0 0;padding-left:22px}.log li{color:var(--muted);margin-bottom:4px}.log li:last-child{color:var(--text)}@media(max-width:720px){.layout{grid-template-columns:1fr}.side{grid-row:1}}@media(prefers-reduced-motion:reduce){.edge.live .arrow{animation:none}}
+</style>
+</head>
+<body><main>
+<h1>Claims workflow replay</h1>
+<p class="intro">Follow a synthetic hospital claim from intake through acknowledgment and remittance. The highlighted arrow shows where the current event is moving.</p>
+<div class="controls">
+<label for="scenario">Scenario</label>
+<select id="scenario"><option value="clean">Clean claim</option><option value="timeout">Lost clearinghouse receipt</option><option value="rollback">Payer-rule rollback</option></select>
+<button id="play" type="button">Play</button><button id="step" type="button">Step</button><button id="reset" type="button">Reset</button>
+</div>
+<div class="layout">
+<section class="panel" aria-label="Claim data flow"><div id="diagram" class="diagram"></div></section>
+<div class="side">
+<section class="panel" aria-labelledby="current"><div class="progress" id="count"></div><h2 id="current">Ready</h2><p class="note" id="note" role="status"></p><pre class="packet" id="packet"></pre></section>
+<section class="panel"><h3>Event history</h3><ol class="log" id="history"></ol></section>
+</div>
+</div>
+<p class="intro" style="margin-top:18px">Replay of the prototype’s synthetic scenarios. The animation runs locally and uses sample events.</p>
+</main>
+<script>
+"use strict";
+const common = {
+  ehr: ["Hospital EHR", "Source claim and revision"],
+  intake: ["Intake · Claim ledger", "Durable storage and duplicate detection"],
+  scrub: ["Claim scrubber", "Payer rules and effective-dated edits"],
+  outbox: ["837 · Dispatch outbox", "Persist outbound bytes and delivery ID"],
+  gateway: ["Simulated clearinghouse", "Partner receipt and outbound forwarding"],
+  inbound: ["Response processor", "Correlates 999, 277CA and 835"],
+  ledger: ["Claim ledger", "Stores matched response events"]
+};
+const shared = [
+  ["Durable intake", "The ledger stores the source claim revision. A repeat upload returns the same claim ID.", "hospital=demo-hospital\nsource=claim-001 · revision=1"],
+  ["Scrub passed", "The scrubber checks the claim against the active payer rule bundle.", "bundle=v1 · generation=1\nfindings=[]"],
+  ["837 staged", "The dispatcher persists the exact outbound bytes and assigns a delivery ID.", "type=837I · delivery=1"]
+];
+const replies = [
+  ["999 correlated", "The response processor associates the implementation acknowledgment with the submitted transaction.", "type=999 · implementation accepted"],
+  ["277CA correlated", "The claim-level acknowledgment reports that the claim passed front-end intake.", "type=277CA · claim accepted"],
+  ["835 correlated", "The remittance is recorded as a separate adjudication event.", "type=835 · remittance matched"]
+];
+const scenarios = {
+  clean: {
+    nodes: [common.ehr, common.intake, common.scrub, common.outbox, common.gateway, common.inbound, common.ledger],
+    events: [...shared, ["Clearinghouse receipt verified", "The clearinghouse receives the outbound file. The matching receipt completes delivery.", "delivery=1 · received"], ...replies],
+    route: [0,1,2,3,4,4,5]
+  },
+  timeout: {
+    nodes: [common.ehr, common.intake, common.scrub, common.outbox, common.gateway, ["Reconciliation", "Query original delivery ID and verify receipt hash"], common.ledger],
+    events: [...shared,
+      ["Receipt lost", "The clearinghouse records the file, but the sender times out. Delivery stays unknown.", "delivery=1 · state=unknown", true],
+      ["Status lookup", "Reconciliation looks up the original delivery. The stored outbound file is not resent.", "lookup delivery=1"],
+      ["Delivery recovered", "The clearinghouse receipt hash matches the stored outbound bytes. The existing delivery is marked received.", "delivery=1 · state=received\nclearinghouse receipts=1"]
+    ],
+    route: [0,1,2,3,4,5]
+  },
+  rollback: {
+    nodes: [common.intake, common.scrub, common.outbox, ["Dispatch gate", "Compare scrub generation with active generation"], ["Rule activation and rollback", "Activate v2, then restore approved v1"], ["Re-scrub", "Evaluate against the restored bundle"], common.gateway],
+    events: [shared[1], shared[2],
+      ["Stale dispatch blocked", "An operator activates v2. The staged claim carries generation 1, so the dispatch gate blocks transmission.", "checked=1 · active=2 · blocked", true],
+      ["New rule holds claim", "Re-scrub under v2 requires an authorization value that the claim lacks.", "bundle=v2 · generation=2\nmissing authorization", true],
+      ["Previous bundle restored", "The operator restores v1. A fresh generation ensures the previously staged result must be checked again.", "bundle=v1 · generation=3"],
+      ["Revalidated claim delivered", "The new scrub result passes under the restored bundle and the delivery proceeds.", "bundle=v1 · generation=3\ndelivery=1 · received"]
+    ],
+    route: [0,1,2,3,4,5]
+  }
+};
+const get = id => document.getElementById(id);
+let index = -1;
+let timer = null;
+function selected() { return scenarios[get("scenario").value]; }
+function drawDiagram() {
+  const diagram = get("diagram");
+  diagram.replaceChildren();
+  selected().nodes.forEach(([title, caption], position) => {
+    if (position) {
+      const edge = document.createElement("div");
+      edge.className = "edge";
+      edge.innerHTML = '<span class="arrow" aria-hidden="true">↓</span><span></span>';
+      diagram.append(edge);
+    }
+    const node = document.createElement("div");
+    node.className = "node";
+    const heading = document.createElement("strong");
+    const detail = document.createElement("small");
+    heading.textContent = title;
+    detail.textContent = caption;
+    node.append(heading, detail);
+    diagram.append(node);
+  });
+}
+function update() {
+  const {events, route} = selected();
+  const event = events[index];
+  const active = event ? route[index] : -1;
+  document.querySelectorAll(".edge").forEach((edge, i) => {
+    edge.classList.toggle("live", i === active);
+    edge.lastElementChild.textContent = i === active ? event[0] : "";
+  });
+  document.querySelectorAll(".node").forEach((node, i) => {
+    node.classList.toggle("current", i === active + 1 && active >= 0);
+    node.classList.toggle("warning", Boolean(event?.[3]) && i === active + 1);
+  });
+  get("count").textContent = "Step " + (index + 1) + " of " + events.length;
+  get("current").textContent = event?.[0] ?? "Ready";
+  get("note").textContent = event?.[1] ?? "Play the sequence or step through it at your own pace.";
+  get("packet").textContent = event?.[2] ?? "Synthetic claim · claim-001";
+  get("step").disabled = index + 1 === events.length;
+}
+function pause() {
+  clearInterval(timer);
+  timer = null;
+  get("play").textContent = "Play";
+}
+function advance() {
+  if (index + 1 >= selected().events.length) return;
+  index += 1;
+  const item = document.createElement("li");
+  item.textContent = selected().events[index][0];
+  get("history").append(item);
+  if (index + 1 === selected().events.length) pause();
+  update();
+}
+function reset() {
+  pause();
+  index = -1;
+  get("history").replaceChildren();
+  drawDiagram();
+  update();
+}
+get("scenario").addEventListener("change", reset);
+get("reset").addEventListener("click", reset);
+get("step").addEventListener("click", () => { pause(); advance(); });
+get("play").addEventListener("click", () => {
+  if (timer !== null) { pause(); return; }
+  if (index + 1 === selected().events.length) reset();
+  timer = setInterval(advance, 1600);
+  get("play").textContent = "Pause";
+  advance();
+});
+reset();
+</script></body></html>
